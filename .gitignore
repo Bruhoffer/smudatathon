@@ -14,3 +14,5 @@ __pycache__/
 # Ignore Python log and temporary files
 *.log
 *.tmp
+
+.env

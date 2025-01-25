@@ -2,8 +2,15 @@ import ast
 import csv
 from py2neo import Graph, Node, Relationship
 import opennre
-import spacy
+from dotenv import load_dotenv
 import os
+
+load_dotenv()
+
+# Retrieve Neo4j credentials
+NEO4J_URI = os.getenv("NEO4J_URI")
+NEO4J_USERNAME = os.getenv("NEO4J_USERNAME")
+NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD")
 
 # Set the correct path for GloVe files
 
@@ -170,7 +177,7 @@ if __name__ == "__main__":
     try:
         # Connect to Neo4j
         print("Connecting to Neo4j...")
-        graph = Graph("bolt://localhost:7687", auth=("neo4j", "smudatathon"))
+        graph = Graph(NEO4J_URI, auth=(NEO4J_USERNAME, NEO4J_PASSWORD))
         print("Connected to Neo4j.")
 
         # Load OpenNRE pre-trained model
