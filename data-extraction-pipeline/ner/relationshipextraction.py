@@ -8,13 +8,36 @@ import os
 load_dotenv()
 
 # Retrieve Neo4j credentials
-NEO4J_URI = os.getenv("NEO4J_URI")
-NEO4J_USERNAME = os.getenv("NEO4J_USERNAME")
-NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD")
+NEO4J_URI2 = os.getenv("NEO4J_URI")
+NEO4J_USERNAME2 = os.getenv("NEO4J_USERNAME")
+NEO4J_PASSWORD2 = os.getenv("NEO4J_PASSWORD")
 
-# Set the correct path for GloVe files
+# Define relevant relationship types 
+RELEVANT_RELATIONSHIPS = {
+    "works for",          # Person → Organization
+    "founded by",         # Organization → Person
+    "located in",         # Entity → Location
+    "associated with",    # Entity → Entity
+    "threat to",          # Entity → Entity (ISD-specific)
+    "member of",          # Entity → Entity
+    "operates in",        # Organization → Location
+    "targets",            # Entity → Entity (ISD-specific)
+    "collaborates with",  # Organization → Organization
+    "reports to",         # Person → Person
+    "involved in",        # Entity → Event
+    "owned by",           # Entity → Entity
+    "headquartered in",   # Organization → Location
+    "child of",           # Entity → Entity
+    "subsidiary of",      # Organization → Organization
+    "participated in",    # Person/Entity → Event
+    "educated at",        # Person → Organization
+    "born in",            # Person → Location
+    "died in",            # Person → Location
+    "awarded",            # Person/Organization → Award
+}
 
-def store_relationships(graph, relationships, source, page, confidence_threshold=0.5):
+
+def store_relationships(graph, relationships, source, page, confidence_threshold=0.57):
     """
     Store extracted relationships in the Neo4j database with labels derived from entity labels.
     Includes source and page metadata as relationship properties.
@@ -26,9 +49,9 @@ def store_relationships(graph, relationships, source, page, confidence_threshold
 
     for rel in relationships:
         try:
-            # Filter by confidence threshold
-            if rel.get("confidence", 0) < confidence_threshold:
-                print(f"Skipping relationship with low confidence: {rel}")
+            # Filter by confidence threshold and relevant relationship types
+            if rel.get("confidence", 0) < confidence_threshold or rel["relationship"] not in RELEVANT_RELATIONSHIPS:
+                print(f"Skipping irrelevant or low-confidence relationship: {rel}")
                 continue
 
             # Use the existing entity labels as node labels
@@ -55,10 +78,12 @@ def store_relationships(graph, relationships, source, page, confidence_threshold
             graph.merge(relationship)
         except Exception as e:
             print(f"Error storing relationship {rel}: {e}")
-            
+
+
 def extract_relationships_with_opennre(text, entities, model):
     """
     Extract relationships using OpenNRE between entities in the text.
+    Only include relationships that are relevant and pass validation.
     """
     relationships = []
 
@@ -95,7 +120,18 @@ def extract_relationships_with_opennre(text, entities, model):
                 # Handle tuple structure of relation
                 if isinstance(relation, tuple) and len(relation) == 2:
                     relation_type, confidence = relation
-                    if confidence > 0.5:  # Confidence threshold
+                    if confidence > 0.57 and relation_type in RELEVANT_RELATIONSHIPS:
+                        # Validate relationship
+                        if not validate_relationship(entity1, entity2, relation_type):
+                            print(f"Invalid relationship: {relation_type} between {entity1['text']} and {entity2['text']}")
+                            continue
+
+                        # Handle PERSON to PERSON relationships
+                        if entity1["label"] == "PERSON" and entity2["label"] == "PERSON":
+                            if relation_type == "member of":
+                                relation_type = "reports to"  # Change to a more meaningful relationship
+
+                        # Append validated relationship
                         relationships.append({
                             "start_entity": entity1["text"],
                             "start_label": entity1["label"],
@@ -104,6 +140,10 @@ def extract_relationships_with_opennre(text, entities, model):
                             "end_label": entity2["label"],
                             "confidence": confidence
                         })
+                        print(f"Text: {text}")
+                        print(f"Entity1: {entity1}, Entity2: {entity2}")
+                        print(f"Predicted Relationship: {relation_type}, Confidence: {confidence}")
+
                 else:
                     print(f"Invalid or unexpected relation object: {relation}")
 
@@ -111,6 +151,32 @@ def extract_relationships_with_opennre(text, entities, model):
                 print(f"Error inferring relationship for entities {entity1['text']} and {entity2['text']}: {e}")
 
     return relationships
+
+
+def validate_relationship(entity1, entity2, relation_type):
+    """
+    Validates relationships based on entity types and common sense rules.
+    Returns True if the relationship is valid, otherwise False.
+    """
+    # Relationships that do not make logical sense
+    invalid_combinations = {
+        "member of": [("DATE", "ORG"), ("PERSON", "PERSON"), ("DATE", "DATE")],
+        "owned by": [("DATE", "ORG"), ("FAC", "DATE"), ("DATE", "GPE"), ("DATE", "ORG"),("DATE", "NORP"),("DATE","PERSON")],
+        "works for": [("DATE", "ORG"), ("ORG", "ORG")],
+    }
+
+    if relation_type in invalid_combinations:
+        if (entity1["label"], entity2["label"]) in invalid_combinations[relation_type]:
+            return False
+        if (entity2["label"], entity1["label"]) in invalid_combinations[relation_type]:
+            return False
+
+    # Catch-all validation for overly generic relationships
+    if relation_type not in RELEVANT_RELATIONSHIPS:
+        return False
+
+    # Default to True if no invalid rules match
+    return True
 
 
 def process_csv_and_store(file_path, graph, model):
@@ -171,13 +237,11 @@ def process_csv_and_store(file_path, graph, model):
     except Exception as e:
         print(f"Unexpected error reading the file {file_path}: {e}")
 
-
-
 if __name__ == "__main__":
     try:
         # Connect to Neo4j
         print("Connecting to Neo4j...")
-        graph = Graph(NEO4J_URI, auth=(NEO4J_USERNAME, NEO4J_PASSWORD))
+        graph = Graph(NEO4J_URI2, auth=(NEO4J_USERNAME2, NEO4J_PASSWORD2))
         print("Connected to Neo4j.")
 
         # Load OpenNRE pre-trained model
@@ -187,7 +251,7 @@ if __name__ == "__main__":
         print("Model loaded successfully.")
 
         # Process CSV file and store data in Neo4j
-        csv_file_path = "ner_output_original.csv"
+        csv_file_path = "ner_output.csv"
         print(f"Processing CSV file: {csv_file_path}")
         process_csv_and_store(csv_file_path, graph, model)
         print("Processing complete.")

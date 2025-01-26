@@ -9,7 +9,7 @@ json_files = ["../pdfsoutput/1.json", "../pdfsoutput/2.json", "../pdfsoutput/4.j
               "../pdfsoutput/13.json", "../pdfsoutput/14.json", "../pdfsoutput/15.json", "../pdfsoutput/16.json", "../pdfsoutput/21.json", "../pdfsoutput/24.json", "../pdfsoutput/26.json", "../pdfsoutput/27.json",
               "../pdfsoutput/31.json", "../pdfsoutput/35.json", "../pdfsoutput/36.json", "../pdfsoutput/38.json", "../pdfsoutput/39.json", "../pdfsoutput/43.json", "../pdfsoutput/44.json", "../pdfsoutput/45.json",
               "../pdfsoutput/47.json", "../pdfsoutput/49.json", "../pdfsoutput/51.json", "../pdfsoutput/52.json", "../pdfsoutput/60.json", "../pdfsoutput/63.json", "../pdfsoutput/69.json", "../pdfsoutput/73.json",
-              "../pdfsoutput/110.json", "../pdfsoutput/111.json", "../pdfsoutput/112.json", "../pdfsoutput/113.json"]
+              "../pdfsoutput/82.json", "../pdfsoutput/89.json", "../pdfsoutput/91.json", "../pdfsoutput/105.json", "../pdfsoutput/106.json", "../pdfsoutput/107.json", "../pdfsoutput/108.json","../pdfsoutput/110.json", "../pdfsoutput/111.json", "../pdfsoutput/112.json", "../pdfsoutput/113.json"]
 
 # Initialize a list to store structured data
 structured_data = []

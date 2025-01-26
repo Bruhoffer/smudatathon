@@ -6,6 +6,19 @@ import os
 INPUT_CSV = "../src/structured_text_data.csv"
 OUTPUT_CSV = "ner_output.csv"
 
+# Define relevant entity labels
+RELEVANT_LABELS = {
+    "PERSON",  # People
+    "ORG",     # Organizations
+    "GPE",     # Geo-political entities (countries, cities, states)
+    "DATE",    # Dates
+    "LOC",     # Locations
+    "NORP",    # Nationalities, religious or political groups
+    "EVENT",   # Events
+    "LAW",     # Laws, legal documents
+    "FAC"      # Facilities (buildings, airports, etc.)
+}
+
 # Load spaCy's pre-trained model
 def load_model():
     """Load the spaCy language model."""
@@ -25,8 +38,13 @@ def extract_entities(text, nlp):
     """
     if pd.isna(text) or not isinstance(text, str):
         return []
+    
     doc = nlp(text)
-    entities = [{"text": ent.text, "label": ent.label_} for ent in doc.ents]
+    entities = [
+        {"text": ent.text, "label": ent.label_}
+        for ent in doc.ents
+        if ent.label_ in RELEVANT_LABELS  # Filter for relevant labels
+    ]
     return entities
 
 # Main processing function
