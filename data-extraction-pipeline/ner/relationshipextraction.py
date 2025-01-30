@@ -1,259 +1,187 @@
-import ast
-import csv
-from py2neo import Graph, Node, Relationship
-import opennre
-from dotenv import load_dotenv
 import os
+import spacy
+import pandas as pd
+import json
+import torch
+from tqdm import tqdm
+from dotenv import load_dotenv
+from py2neo import Graph, Node, Relationship
+from sentence_transformers import SentenceTransformer, util
+import opennre
+import ast
+from fuzzywuzzy import fuzz
 
+# Load environment variables (Neo4j credentials)
 load_dotenv()
+NEO4J_URI = os.getenv("NEO4J_URI")
+NEO4J_USERNAME = os.getenv("NEO4J_USERNAME")
+NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD")
 
-# Retrieve Neo4j credentials
-NEO4J_URI2 = os.getenv("NEO4J_URI")
-NEO4J_USERNAME2 = os.getenv("NEO4J_USERNAME")
-NEO4J_PASSWORD2 = os.getenv("NEO4J_PASSWORD")
+# ✅ Check if Neo4j Connection Works
+try:
+    graph = Graph(NEO4J_URI, auth=(NEO4J_USERNAME, NEO4J_PASSWORD))
+    graph.run("RETURN 1")
+    print("✅ Connected to Neo4j.")
+except Exception as e:
+    print(f"❌ Neo4j connection failed: {e}")
+    exit()
 
-# Define relevant relationship types 
-RELEVANT_RELATIONSHIPS = {
-    "works for",          # Person → Organization
-    "founded by",         # Organization → Person
-    "located in",         # Entity → Location
-    "associated with",    # Entity → Entity
-    "threat to",          # Entity → Entity (ISD-specific)
-    "member of",          # Entity → Entity
-    "operates in",        # Organization → Location
-    "targets",            # Entity → Entity (ISD-specific)
-    "collaborates with",  # Organization → Organization
-    "reports to",         # Person → Person
-    "involved in",        # Entity → Event
-    "owned by",           # Entity → Entity
-    "headquartered in",   # Organization → Location
-    "child of",           # Entity → Entity
-    "subsidiary of",      # Organization → Organization
-    "participated in",    # Person/Entity → Event
-    "educated at",        # Person → Organization
-    "born in",            # Person → Location
-    "died in",            # Person → Location
-    "awarded",            # Person/Organization → Award
-}
+# Load NLP models
+nlp = spacy.load("en_core_web_md")  
+device = "cuda" if torch.cuda.is_available() else "cpu"
+embedding_model = SentenceTransformer('paraphrase-MiniLM-L6-v2', device=device)
 
+# Load OpenNRE for Relationship Extraction
+nre_model = opennre.get_model('wiki80_cnn_softmax', root_path="./OpenNRE")
 
-def store_relationships(graph, relationships, source, page, confidence_threshold=0.57):
-    """
-    Store extracted relationships in the Neo4j database with labels derived from entity labels.
-    Includes source and page metadata as relationship properties.
-    Only stores relationships with confidence above the specified threshold.
-    """
+# Relationship keywords for classification
+relationship_keywords = [
+    "threat to", "associated with", "collaborates with", "operates in", "funded by",
+    "affiliated with", "connected to", "has conflict with", "leader of", "suspected member of",
+    "targets", "linked to", "receives support from", "monitored by", "detained by",
+    "interacts with", "opposes", "has influence over", "fined", "sentenced", "convicted", "banned",
+    "elected", "resigned", "investigated", "charged", "partnered with", "owns", "merged with", "acquired"
+]
+rel_embeddings = embedding_model.encode(relationship_keywords, convert_to_tensor=True)
+
+negation_words = {"not", "never", "no", "without"}
+
+def detect_negation(dep_path):
+    """ Detects negation in dependency path. """
+    return any(neg in dep_path.lower() for neg in negation_words)
+
+def extract_dependency_path(doc, ent1, ent2):
+    """ Extracts dependency path with Spacy syntactic tree. """
+    ent1_token = next((token for token in doc if ent1.lower() in token.text.lower()), None)
+    ent2_token = next((token for token in doc if ent2.lower() in token.text.lower()), None)
+
+    if not ent1_token or not ent2_token:
+        return "UNKNOWN"
+
+    path = []
+    current = ent1_token
+    while current != ent2_token and current.head != current:
+        path.append(current.text)
+        current = current.head
+    path.append(ent2_token.text)
+
+    return " -> ".join(path)
+
+def classify_relationship(dep_path, negation_flag):
+    """ Matches extracted dependency path to closest intelligence-related relationship. """
+    dep_embedding = embedding_model.encode(dep_path, convert_to_tensor=True)
+
+    similarities = util.pytorch_cos_sim(dep_embedding, rel_embeddings)[0]
+    best_score, best_idx = torch.max(similarities, dim=0)
+    best_score = float(best_score)
+    best_idx = int(best_idx)
+
+    best_match = relationship_keywords[best_idx] if best_score > 0.4 else "UNKNOWN"
+
+    print(f"🧐 Matching: '{dep_path}' → '{best_match}' (Score: {best_score})")
+
+    return best_match, best_score
+
+def fuzzy_match_entity(doc, entity_text):
+    """ Finds the best matching entity in the Spacy document if exact match fails. """
+    for ent in doc.ents:
+        if fuzz.partial_ratio(ent.text.lower(), entity_text.lower()) > 80:
+            return ent.text
+    return entity_text
+
+def extract_relationships(text, entity_pairs, entity_info):
+    """Extracts relationships while also preserving entity types for Neo4j storage."""
+    doc = nlp(text)
+    relations = []
+
+    for ent1, ent2 in entity_pairs:
+        ent1_matched = fuzzy_match_entity(doc, ent1)
+        ent2_matched = fuzzy_match_entity(doc, ent2)
+
+        dep_path = extract_dependency_path(doc, ent1_matched, ent2_matched)
+        negation_flag = detect_negation(dep_path)
+        best_rel, similarity_score = classify_relationship(dep_path, negation_flag)
+
+        # Get entity types from entity_info dictionary
+        ent1_type = entity_info.get(ent1, "Entity")  
+        ent2_type = entity_info.get(ent2, "Entity")
+
+        if best_rel != "UNKNOWN" and similarity_score > 0.4:
+            relations.append({
+                "entity1": ent1_matched, "entity2": ent2_matched,
+                "relationship": best_rel, "confidence": similarity_score,
+                "entity1_type": ent1_type, "entity2_type": ent2_type  
+            })
+
+    return relations
+
+def store_relationships_in_neo4j(relationships):
+    """Stores extracted relationships in Neo4j with correct entity type labels."""
     if not relationships:
-        print("No relationships to store.")
+        print("⚠️ No relationships to store.")
         return
+
+    print(f"💾 Storing {len(relationships)} relationships in Neo4j...")
 
     for rel in relationships:
         try:
-            # Filter by confidence threshold and relevant relationship types
-            if rel.get("confidence", 0) < confidence_threshold or rel["relationship"] not in RELEVANT_RELATIONSHIPS:
-                print(f"Skipping irrelevant or low-confidence relationship: {rel}")
-                continue
+            entity1_type = rel.get("entity1_type", "Entity")
+            entity2_type = rel.get("entity2_type", "Entity")
 
-            # Use the existing entity labels as node labels
-            start_label = rel.get("start_label", "Entity")  # Default to 'Entity' if label is missing
-            end_label = rel.get("end_label", "Entity")
+            start_node = Node(entity1_type, name=rel["entity1"])  
+            end_node = Node(entity2_type, name=rel["entity2"])  
+            relationship = Relationship(start_node, rel["relationship"], end_node, confidence=rel["confidence"])
 
-            # Create nodes
-            start_node = Node(start_label, name=rel["start_entity"])
-            end_node = Node(end_label, name=rel["end_entity"])
-
-            # Create relationship with metadata
-            relationship = Relationship(
-                start_node,
-                rel["relationship"],
-                end_node,
-                confidence=rel.get("confidence", 0),  # Add confidence as a property
-                source=source,
-                page=page
-            )
-
-            # Merge nodes and relationship
-            graph.merge(start_node, start_label, "name")
-            graph.merge(end_node, end_label, "name")
+            graph.merge(start_node, entity1_type, "name")  
+            graph.merge(end_node, entity2_type, "name")  
             graph.merge(relationship)
+
+            print(f"✅ Stored: {rel['entity1']} ({entity1_type}) -[{rel['relationship']}]-> {rel['entity2']} ({entity2_type})")
+
         except Exception as e:
-            print(f"Error storing relationship {rel}: {e}")
+            print(f"❌ Error storing relationship {rel}: {e}")
 
+import ast
 
-def extract_relationships_with_opennre(text, entities, model):
-    """
-    Extract relationships using OpenNRE between entities in the text.
-    Only include relationships that are relevant and pass validation.
-    """
-    relationships = []
+def process_text_data(input_file, output_file):
+    """Process CSV file, extract relationships, and preserve entity types."""
+    df = pd.read_csv(input_file)
 
-    # Check if at least two entities are present
-    if len(entities) < 2:
-        print("Less than two entities in text, skipping.")
-        return relationships
+    results = []
+    for idx, row in tqdm(df.iterrows(), total=len(df)):
+        print(f"\n📝 Processing row {idx+1}/{len(df)}")
+        
+        text = row["text"]
 
-    # Iterate over entity pairs
-    for i, entity1 in enumerate(entities):
-        for j, entity2 in enumerate(entities):
-            if i >= j:  # Avoid duplicate and self-pairing
+        try:
+            entities = ast.literal_eval(row["entities"])
+            if not isinstance(entities, list):
                 continue
+        except:
+            continue
 
-            try:
-                # Check if entity spans are valid
-                h_pos_start = text.find(entity1["text"])
-                t_pos_start = text.find(entity2["text"])
-                if h_pos_start == -1 or t_pos_start == -1:
-                    print(f"Entity span not found in text: {entity1['text']}, {entity2['text']}")
-                    continue
+        entity_info = {ent["text"]: ent["label"] for ent in entities}  
 
-                # Use OpenNRE to infer the relationship
-                try:
-                    relation = model.infer({
-                        'text': text,
-                        'h': {'pos': [h_pos_start, h_pos_start + len(entity1["text"])]},
-                        't': {'pos': [t_pos_start, t_pos_start + len(entity2["text"])]}
-                    })
-                except Exception as e:
-                    print(f"Error during model inference: {e}")
-                    continue
+        MAX_ENTITY_PAIRS = 15
+        entity_pairs = [(entities[i]["text"], entities[j]["text"]) for i in range(len(entities)) for j in range(i + 1, len(entities))]
+        entity_pairs = entity_pairs[:MAX_ENTITY_PAIRS]
 
-                # Handle tuple structure of relation
-                if isinstance(relation, tuple) and len(relation) == 2:
-                    relation_type, confidence = relation
-                    if confidence > 0.57 and relation_type in RELEVANT_RELATIONSHIPS:
-                        # Validate relationship
-                        if not validate_relationship(entity1, entity2, relation_type):
-                            print(f"Invalid relationship: {relation_type} between {entity1['text']} and {entity2['text']}")
-                            continue
+        relations = extract_relationships(text, entity_pairs, entity_info)
+        results.extend(relations)
 
-                        # Handle PERSON to PERSON relationships
-                        if entity1["label"] == "PERSON" and entity2["label"] == "PERSON":
-                            if relation_type == "member of":
-                                relation_type = "reports to"  # Change to a more meaningful relationship
+    print(f"💾 Extracted {len(results)} relationships.")
+    store_relationships_in_neo4j(results)
 
-                        # Append validated relationship
-                        relationships.append({
-                            "start_entity": entity1["text"],
-                            "start_label": entity1["label"],
-                            "relationship": relation_type,
-                            "end_entity": entity2["text"],
-                            "end_label": entity2["label"],
-                            "confidence": confidence
-                        })
-                        print(f"Text: {text}")
-                        print(f"Entity1: {entity1}, Entity2: {entity2}")
-                        print(f"Predicted Relationship: {relation_type}, Confidence: {confidence}")
+    with open(output_file, "w") as f:
+        json.dump(results, f, indent=4)
 
-                else:
-                    print(f"Invalid or unexpected relation object: {relation}")
+    print(f"✅ Saved extracted relationships to {output_file}")
 
-            except Exception as e:
-                print(f"Error inferring relationship for entities {entity1['text']} and {entity2['text']}: {e}")
+# Run pipeline
+process_text_data("ner_output.csv", "finaloutput.csv")
 
-    return relationships
-
-
-def validate_relationship(entity1, entity2, relation_type):
-    """
-    Validates relationships based on entity types and common sense rules.
-    Returns True if the relationship is valid, otherwise False.
-    """
-    # Relationships that do not make logical sense
-    invalid_combinations = {
-        "member of": [("DATE", "ORG"), ("PERSON", "PERSON"), ("DATE", "DATE")],
-        "owned by": [("DATE", "ORG"), ("FAC", "DATE"), ("DATE", "GPE"), ("DATE", "ORG"),("DATE", "NORP"),("DATE","PERSON")],
-        "works for": [("DATE", "ORG"), ("ORG", "ORG")],
-    }
-
-    if relation_type in invalid_combinations:
-        if (entity1["label"], entity2["label"]) in invalid_combinations[relation_type]:
-            return False
-        if (entity2["label"], entity1["label"]) in invalid_combinations[relation_type]:
-            return False
-
-    # Catch-all validation for overly generic relationships
-    if relation_type not in RELEVANT_RELATIONSHIPS:
-        return False
-
-    # Default to True if no invalid rules match
-    return True
-
-
-def process_csv_and_store(file_path, graph, model):
-    """
-    Process the CSV file, extract relationships, and store them in Neo4j.
-    Includes source and page metadata.
-    """
-    try:
-        with open(file_path, mode="r", encoding="utf-8") as file:
-            reader = csv.DictReader(file)
-
-            for row in reader:
-                try:
-                    # Extract required columns
-                    source = row.get("source", "Unknown")
-                    page = row.get("page", "Unknown")
-                    text = row.get("text", "")
-                    entities_raw = row.get("entities", "")
-
-                    # Skip rows with missing text or entities
-                    if not text or not entities_raw:
-                        print(f"Skipping row with missing text or entities. Source: {source}, Page: {page}")
-                        continue
-
-                    # Convert stringified list of dictionaries to Python objects
-                    try:
-                        entities = ast.literal_eval(entities_raw)
-                    except Exception as e:
-                        print(f"Failed to parse entities: {entities_raw}. Skipping row. Source: {source}, Page: {page}. Error: {e}")
-                        continue
-
-                    # Validate entities structure
-                    if not isinstance(entities, list):
-                        print(f"Invalid entities format: {entities}. Skipping row. Source: {source}, Page: {page}")
-                        continue
-
-                    # Filter valid entities
-                    valid_entities = [
-                        entity for entity in entities
-                        if isinstance(entity, dict) and "text" in entity and "label" in entity
-                    ]
-
-                    if len(valid_entities) < 2:
-                        print(f"Not enough valid entities in row: {valid_entities}. Skipping row. Source: {source}, Page: {page}")
-                        continue
-
-                    # Extract relationships using OpenNRE
-                    relationships = extract_relationships_with_opennre(text, valid_entities, model)
-
-                    # Store relationships in Neo4j with source and page metadata
-                    store_relationships(graph, relationships, source, page)
-                    print(f"Processed text from Source: {source}, Page: {page}")
-                    print(f"Extracted Relationships: {relationships}")
-                except Exception as e:
-                    print(f"Error processing row: {row}, error: {e}")
-    except FileNotFoundError:
-        print(f"File not found: {file_path}")
-    except Exception as e:
-        print(f"Unexpected error reading the file {file_path}: {e}")
-
-if __name__ == "__main__":
-    try:
-        # Connect to Neo4j
-        print("Connecting to Neo4j...")
-        graph = Graph(NEO4J_URI2, auth=(NEO4J_USERNAME2, NEO4J_PASSWORD2))
-        print("Connected to Neo4j.")
-
-        # Load OpenNRE pre-trained model
-        print("Loading OpenNRE pre-trained model...")
-        model = opennre.get_model('wiki80_cnn_softmax', root_path="/Users/justiny/Projects/smudatathon/data-extraction-pipeline/ner/OpenNRE")
-
-        print("Model loaded successfully.")
-
-        # Process CSV file and store data in Neo4j
-        csv_file_path = "ner_output.csv"
-        print(f"Processing CSV file: {csv_file_path}")
-        process_csv_and_store(csv_file_path, graph, model)
-        print("Processing complete.")
-    except Exception as e:
-        print(f"Critical error in the main pipeline: {e}")
+# Debugging: Verify Neo4j Storage
+print("🔎 Running Neo4j Debug Queries...")
+print(graph.run("MATCH (n) RETURN DISTINCT labels(n);").data())  
+print(graph.run("MATCH (n) RETURN COUNT(n);").data())  
+print(graph.run("MATCH ()-[r]->() RETURN COUNT(r);").data())  
