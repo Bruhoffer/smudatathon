@@ -5,7 +5,7 @@ from graph_visualization import create_network_graph, display_graph
 
 # 🎯 **Set up page**
 st.set_page_config(layout="wide", page_title="📊 Graph RAG Viewer", page_icon=":chart_with_upwards_trend:")
-st.title("📊 Graph RAG with Neo4j and LangChain")
+st.title("Intelligence Analysis System for the Internal Security Department (ISD)")
 
 # ==============================
 # 🔢 **Graph Statistics**
@@ -33,7 +33,7 @@ if st.button("Get Answer"):
 # 🎛️ **Graph Filters**
 # ==============================
 st.sidebar.subheader("🔍 Filter Graph")
-min_degree = st.sidebar.slider("Minimum Node Degree (Influence)", 1, 20, 1)
+min_degree = st.sidebar.slider("Minimum Node Degree (Influence)", 0.001, 1.00, 0.001)
 min_confidence = st.sidebar.slider("Minimum Confidence Score", 0.1, 1.0, 0.5)
 
 # ==============================

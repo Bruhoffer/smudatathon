@@ -14,7 +14,7 @@ import streamlit.components.v1 as components
 # Load environment variables
 load_dotenv()
 
-# 🎨 Define Colors for Different Entity Types
+# Define Colors for Different Entity Types
 ENTITY_COLORS = {
     "PERSON": "#ff4c4c",    # 🔴 Red
     "ORG": "#4caf50",       # 🟢 Green
@@ -63,7 +63,6 @@ def fetch_graph_data(graph):
         target_label = record["target_label"] or "Unknown"
         confidence = record["confidence"] if record["confidence"] else 0.5
 
-        # ❌ Skip nodes that start with "https://"
         if source_name.startswith("https://") or target_name.startswith("https://"):
             continue
 

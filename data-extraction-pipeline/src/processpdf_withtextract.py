@@ -87,7 +87,6 @@ def process_pdf_with_async_textract(file_path, output_folder, bucket_name):
             print(f"Failed to start text detection for {file_path}: {fallback_error}")
             return
 
-    # Poll for job completion
     try:
         status = check_job_status(job_id)
     except Exception as status_error:
@@ -98,7 +97,6 @@ def process_pdf_with_async_textract(file_path, output_folder, bucket_name):
         try:
             results = get_textract_results(job_id)
 
-            # Save results to a JSON file
             output_file = os.path.join(output_folder, os.path.basename(file_path).replace(".pdf", ".json"))
             with open(output_file, "w") as f:
                 json.dump(results, f, indent=4)
@@ -126,7 +124,6 @@ if __name__ == "__main__":
     # Define input and output folders and S3 bucket name
     input_folder = "../../pdfs"
     output_folder = "../../pdfsoutput"
-    bucket_name = "smudatathon-textract-bucket"  # Replace with your S3 bucket name
+    bucket_name = "smudatathon-textract-bucket" 
 
-    # Process all PDFs in the input folder
     process_multiple_pdfs(input_folder, output_folder, bucket_name)
