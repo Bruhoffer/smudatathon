@@ -36,8 +36,8 @@ The **Internal Security Department (ISD) of Singapore** requires an AI-powered i
 
 Step 1: Clone the Repository  
 ```bash
- git clone https://github.com/YOUR_GITHUB_USERNAME/AI-Intelligence-Analysis.git
- cd AI-Intelligence-Analysis
+ git clone https://github.com/YOUR_GITHUB_USERNAME/smudatathon.git
+ cd smudatathon
 ```
 
 Step 2: Install Dependencies  
